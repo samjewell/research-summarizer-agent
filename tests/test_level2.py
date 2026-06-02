@@ -20,12 +20,15 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Any
 
+import anthropic
 import pytest
 
 from agent.agent import summarize
 from agent.models import SummaryResult
 from agent.tools import SearchResult, StubSearchTool
+from tests.conftest import LEVEL2_USAGE
 
 
 pytestmark = pytest.mark.skipif(
@@ -116,6 +119,40 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 @pytest.fixture(autouse=True)
 def _pin_temperature_to_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUMMARIZER_TEMPERATURE", "0")
+
+
+@pytest.fixture(autouse=True)
+def _capture_anthropic_usage(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Wrap ``anthropic.Anthropic`` to record ``response.usage`` per call.
+
+    Each ``messages.create()`` call appends a row to ``LEVEL2_USAGE``; the
+    ``pytest_terminal_summary`` hook in ``tests/conftest.py`` formats and
+    prints the totals once the session ends.
+    """
+    real_anthropic_cls = anthropic.Anthropic
+    test_id = request.node.nodeid
+
+    class _CapturingMessages:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+
+        def create(self, **kwargs: Any) -> Any:
+            response = self._real.create(**kwargs)
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                LEVEL2_USAGE.append(
+                    (test_id, int(usage.input_tokens), int(usage.output_tokens))
+                )
+            return response
+
+    class _CapturingClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._real = real_anthropic_cls(*args, **kwargs)
+            self.messages = _CapturingMessages(self._real.messages)
+
+    monkeypatch.setattr("agent.agent.anthropic.Anthropic", _CapturingClient)
 
 
 def _count_sentences(text: str) -> int:
